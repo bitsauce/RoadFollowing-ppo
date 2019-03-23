@@ -10,17 +10,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 from skimage import transform
-from stable_baselines.ddpg.noise import OrnsteinUhlenbeckActionNoise
 
 from ppo import PPO
 from vae.models import ConvVAE, MlpVAE
-from replay_buffers import PrioritizedReplayBuffer
 from RoadFollowingEnv.car_racing import RoadFollowingEnv
 from utils import VideoRecorder, preprocess_frame, compute_gae
 
 def reward1(state):
-    # -10 for driving off-track
-    if state.num_contacts == 0: return -10 * 0.1
+    # -10 for driving off-road
+    if state.off_road == True: return -10 * 0.1
     # + 1 x throttle
     reward = state.velocity * 0.001
     #reward -= 0.01
@@ -49,8 +47,9 @@ def make_env(title=None, frame_skip=0, encode_state_fn=None):
                            encode_state_fn=encode_state_fn,
                            reward_fn=reward1,
                            throttle_scale=0.1,
-                           #steer_scale=0.25,
                            max_speed=30,
+                           terminate_off_road=True,
+                           terminate_when_stopped=True,
                            frame_skip=frame_skip)
     env.seed(0)
     return env
@@ -70,7 +69,7 @@ def test_agent(test_env, model, video_filename=None):
     # While non-terminal state
     while not terminal:
         # Take deterministic actions at test time (noise_scale=0)
-        action = model.predict([state], greedy=True)[0][0]
+        action, _ = model.predict([state], greedy=True)
         state, reward, terminal, _ = test_env.step(action)
 
         # Add frame
@@ -107,7 +106,8 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
     test_env = make_env(model_name + " (Test)", encode_state_fn=encode_state_fn)
 
     # Traning parameters
-    initial_lr       = params["initial_lr"]
+    learning_rate    = params["learning_rate"]
+    lr_decay         = params["lr_decay"]
     discount_factor  = params["discount_factor"]
     gae_lambda       = params["gae_lambda"]
     ppo_epsilon      = params["ppo_epsilon"]
@@ -115,6 +115,7 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
     entropy_scale    = params["entropy_scale"]
     horizon          = params["horizon"]
     num_epochs       = params["num_epochs"]
+    num_episodes     = params["num_episodes"]
     batch_size       = params["batch_size"]
 
     print("")
@@ -133,7 +134,8 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
 
     # Create model
     print("Creating model")
-    model = PPO(input_shape, num_actions, action_min, action_max, 
+    model = PPO(input_shape, num_actions, action_min, action_max,
+                learning_rate=learning_rate, lr_decay=lr_decay,
                 epsilon=ppo_epsilon, value_scale=value_scale, entropy_scale=entropy_scale,
                 output_dir=os.path.join("models", model_name))
 
@@ -144,35 +146,42 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
             if answer.upper() == "C":
                 model.load_latest_checkpoint()
             elif answer.upper() == "R":
-                shutil.rmtree(model.output_dir)
-                for d in model.dirs:
-                    os.makedirs(d)
+                restart = True
             else:
                 raise Exception("There are already log files for model \"{}\". Please delete it or change model_name and try again".format(model_name))
-    else:
+    if restart:
         shutil.rmtree(model.output_dir)
         for d in model.dirs:
             os.makedirs(d)
-    #model.init_logging()
+    model.init_logging()
     model.write_dict_to_summary("hyperparameters", params, 0)
 
     # For every episode
-    episode_counter = 0
-    while episode_counter < 100:
+    while model.get_episode_idx() < num_episodes:
+        episode_idx = model.get_episode_idx()
 
-
-        print(f"Episode {episode_counter} (Step {model.step_idx})")
+        # Save model periodically
+        if episode_idx % save_interval == 0:
+            model.save()
+        
+        # Run evaluation periodically
+        if episode_idx % eval_interval == 0:
+            video_filename = os.path.join(model.video_dir, "episode{}.avi".format(episode_idx))
+            eval_reward, eval_score = test_agent(test_env, model, video_filename=video_filename)
+            model.write_value_to_summary("eval/score",  eval_score,  episode_idx)
+            model.write_value_to_summary("eval/reward", eval_reward, episode_idx)
 
         # Reset environment
         state, terminal_state, total_reward, total_value = env.reset(), False, 0, 0
         
         # While episode not done
+        print(f"Episode {episode_idx} (Step {model.get_train_step_idx()})")
         while not terminal_state:
             states, taken_actions, values, rewards, dones = [], [], [], [], []
             for _ in range(horizon):
-                action, value = model.predict([state])
-                action, value = action[0], value[0][0]
+                action, value = model.predict([state], write_to_summary=True)
 
+                # Show value on-screen
                 env.value_label.text = "V(s)={:.2f}".format(value)
 
                 # Perform action
@@ -181,37 +190,35 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                 total_reward += reward
 
                 # Store state, action and reward
-                states.append(state)                      # [T, N, 84, 84, 4]
-                taken_actions.append(action)              # [T, N, 3]
-                values.append(np.squeeze(value, axis=-1)) # [T, N]
-                rewards.append(reward)                    # [T, N]
-                dones.append(terminal_state)                        # [T, N]
+                states.append(state)         # [T, *input_shape]
+                taken_actions.append(action) # [T,  num_actions]
+                values.append(value)         # [T]
+                rewards.append(reward)       # [T]
+                dones.append(terminal_state) # [T]
                 state = new_state
 
                 if terminal_state:
                     break
 
-
-            # Calculate last values (bootstrap values)
-            last_values = np.squeeze(model.predict([state])[1], axis=-1)[0] # [N]
+            # Calculate last value (bootstrap value)
+            _, last_values = model.predict([state]) # []
             
+            # Compute GAE
             advantages = compute_gae(rewards, values, last_values, dones, discount_factor, gae_lambda)
             returns = advantages + values
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-
             # Flatten arrays
-            states        = np.array(states).reshape((-1, *input_shape))       # [T x N, 84, 84, 4]
-            taken_actions = np.array(taken_actions).reshape((-1, num_actions)) # [T x N, 3]
-            returns       = returns.flatten()                                  # [T x N]
-            advantages    = advantages.flatten()                               # [T X N]
+            states        = np.array(states)
+            taken_actions = np.array(taken_actions)
+            returns       = np.array(returns)
+            advantages    = np.array(advantages)
 
             T = len(rewards)
-            N = 1
-            assert states.shape == (T * N, *input_shape)
-            assert taken_actions.shape == (T * N, num_actions)
-            assert returns.shape == (T * N,)
-            assert advantages.shape == (T * N,)
+            assert states.shape == (T, *input_shape)
+            assert taken_actions.shape == (T, num_actions)
+            assert returns.shape == (T,)
+            assert advantages.shape == (T,)
 
             # Train for some number of epochs
             model.update_old_policy() # θ_old <- θ
@@ -220,17 +227,6 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                 indices = np.arange(num_samples)
                 np.random.shuffle(indices)
                 for i in range(int(np.ceil(num_samples / batch_size))):
-                    # Evaluate model
-                    """if model.step_idx % eval_interval == 0:
-                        print("Running evaluation...")
-                        avg_reward, value_error = evaluate(model, test_env, discount_factor, frame_stack_size, make_video=True)
-                        model.write_to_summary("eval_avg_reward", avg_reward)
-                        model.write_to_summary("eval_value_error", value_error)"""
-                        
-                    # Save model
-                    if model.step_idx % save_interval == 0:
-                        model.save()
-
                     # Sample mini-batch randomly
                     begin = i * batch_size
                     end   = begin + batch_size
@@ -243,11 +239,10 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                                 returns[mb_idx], advantages[mb_idx])
 
         # Write episodic values
-        #model.write_value_to_summary("train/episodic/score", env.reward, episode_counter)
-        #model.write_value_to_summary("train/episodic/reward", total_reward, episode_counter)
-        #model.write_value_to_summary("train/episodic/q_value", total_q, episode_counter)
-        #model.write_episodic_summaries(episode_counter)
-        episode_counter += 1
+        model.write_value_to_summary("train/score", env.reward, episode_idx)
+        model.write_value_to_summary("train/reward", total_reward, episode_idx)
+        model.write_value_to_summary("train/value", total_value, episode_idx)
+        model.write_episodic_summaries()
 
 if __name__ == "__main__":
     import argparse
@@ -255,7 +250,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Trains an agent in a the RoadFollowing environment")
 
     # Hyper parameters
-    parser.add_argument("--initial_lr", type=float, default=3e-4)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--lr_decay", type=float, default=1.0)
     parser.add_argument("--discount_factor", type=float, default=0.99)
     parser.add_argument("--gae_lambda", type=float, default=0.95)
     parser.add_argument("--ppo_epsilon", type=float, default=0.2)
@@ -263,13 +259,14 @@ if __name__ == "__main__":
     parser.add_argument("--entropy_scale", type=float, default=0.01)
     parser.add_argument("--horizon", type=int, default=128)
     parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--num_episodes", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=128)
 
     # Training vars
     parser.add_argument("--model_name", type=str, required=True)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--save_interval", type=int, default=10)
-    parser.add_argument("--eval_interval", type=int, default=10)
+    parser.add_argument("--save_interval", type=int, default=5)
+    parser.add_argument("--eval_interval", type=int, default=5)
     parser.add_argument("--record_eval", type=bool, default=True)
     parser.add_argument("-restart", action="store_true")
 

@@ -77,8 +77,6 @@ class FrictionDetector(contactListener):
         self._contact(contact, False)
 
     def _contact(self, contact, begin):
-        self.env.state.num_contacts += 1 if begin else -1
-
         tile = None
         obj = None
         u1 = contact.fixtureA.body.userData
@@ -104,6 +102,8 @@ class FrictionDetector(contactListener):
                 self.env.reward += 1000.0 / len(self.env.track)
         else:
             obj.tiles.remove(tile)
+            if self.env.t > 1.0 and len(obj.tiles) == 0:
+                self.env.state.off_road = True
             #print tile.road_friction, "DEL", len(obj.tiles) -- should delete to zero when on grass (this works)
 
 class State():
@@ -113,7 +113,7 @@ class State():
         self.steering = 0.0
         self.velocity = 0.0
         self.distance_traveled = 0.0
-        self.num_contacts = 0
+        self.off_road = False
         self.num_tiles_visited = 0
 
 class RoadFollowingEnv(gym.Env, EzPickle):
@@ -122,7 +122,8 @@ class RoadFollowingEnv(gym.Env, EzPickle):
         'video.frames_per_second' : FPS
     }
 
-    def __init__(self, title=None, throttle_scale=1.0, steer_scale=1.0, max_speed=None, reward_fn=None, encode_state_fn=None, frame_skip=0):
+    def __init__(self, title=None, throttle_scale=1.0, steer_scale=1.0, max_speed=None, frame_skip=0,
+                 terminate_off_road=True, terminate_when_stopped=True, reward_fn=None, encode_state_fn=None):
         EzPickle.__init__(self)
         self.seed()
         self.contactListener = FrictionDetector(self)
@@ -138,14 +139,16 @@ class RoadFollowingEnv(gym.Env, EzPickle):
         self.reward = 0.0
         self.state = State()
         self.title = title
-        self.encode_state_fn = (lambda x: x) if encode_state_fn is None else encode_state_fn
+        self.encode_state_fn = (lambda state: state.frame) if encode_state_fn is None else encode_state_fn
         self.reward_fn = reward_fn
         self.frame_skip = frame_skip
+        self.terminate_off_road = terminate_off_road
+        self.terminate_when_stopped = terminate_when_stopped
 
-        #obs = self.reset()
+        obs = self.reset()
 
         self.action_space = spaces.Box(np.array([-1, 0]), np.array([1, 1]), dtype=np.float32)  # steer, gas, brake
-        #self.observation_space = spaces.Box(low=0.0, high=1.0, shape=obs.shape, dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=obs.shape, dtype=obs.dtype)
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
@@ -355,7 +358,11 @@ class RoadFollowingEnv(gym.Env, EzPickle):
             x, y = self.car.hull.position
             if abs(x) > PLAYFIELD or abs(y) > PLAYFIELD:
                 done = True
-        if self.state.num_contacts == 0 or (velocity < 0.1 and self.t > 1.0):
+
+        if self.terminate_off_road and self.state.off_road:
+            done = True
+
+        if self.terminate_when_stopped and  (velocity < 0.1 and self.t > 1.0):
             done = True
 
         return self.state.encoded_state, self.reward if self.reward_fn is None else self.reward_fn(self.state), done, {}
@@ -504,7 +511,7 @@ class RoadFollowingEnv(gym.Env, EzPickle):
         self.score_label.text = "%04i" % self.reward
         self.score_label.draw()
 
-        #self.value_label.text = "On-road" if self.state.num_contacts > 0 else "Off-road"
+        #self.value_label.text = "On-road" if not self.state.off_road else "Off-road"
         self.value_label.draw()
         self.distance_traveled_label.text = "Distance: {:.2f}".format(self.state.distance_traveled)
         self.distance_traveled_label.draw()
@@ -512,8 +519,7 @@ class RoadFollowingEnv(gym.Env, EzPickle):
 
 if __name__=="__main__":
     from pyglet.window import key
-    #env = RoadFollowingEnv(throttle_scale=0.1, steer_scale=0.25)
-    env = RoadFollowingEnv(throttle_scale=0.1, steer_scale=0.25, max_speed=30)
+    env = RoadFollowingEnv(throttle_scale=0.1, steer_scale=0.25, max_speed=30, terminate_off_road=False)
     a = np.zeros(env.action_space.shape[0])
     def key_press(k, mod):
         global restart
