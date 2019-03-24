@@ -68,30 +68,6 @@ class VAE():
             self.reconstructed_logits = tf.layers.flatten(decoded, name="reconstructed_logits")
             self.reconstructed_states = tf.nn.sigmoid(self.reconstructed_logits, name="reconstructed_states")
 
-            # Reconstruction loss
-            self.flattened_input = tf.layers.flatten(self.input_states, name="flattened_input")
-            self.reconstruction_loss = tf.reduce_mean(
-                tf.reduce_sum(
-                    loss_fn(labels=self.flattened_input, logits=self.reconstructed_logits, targets=self.reconstructed_states),
-                    axis=1
-                )
-            )
-
-            # KL divergence loss
-            self.kl_loss = kl_divergence(self.mean, self.logstd_sq, name="kl_divergence")
-            if self.kl_tolerance > 0:
-                self.kl_loss = tf.maximum(self.kl_loss, self.kl_tolerance * self.z_dim)
-            self.kl_loss = tf.reduce_mean(self.kl_loss)
-
-            # Total loss
-            self.loss = self.reconstruction_loss + self.beta * self.kl_loss
-
-            # Set model dirs
-            self.model_name = model_name
-            self.models_dir = os.path.join(models_dir, "models", model_name)
-            self.log_dir = os.path.join(models_dir, "logs", model_name)
-            self.dirs = [self.models_dir, self.log_dir]
-
             # Epoch variable
             self.step_idx = tf.Variable(0, name="step_idx", trainable=False)
             self.inc_step_idx = tf.assign(self.step_idx, self.step_idx + 1)
@@ -99,6 +75,24 @@ class VAE():
             # Create optimizer
             self.saver = tf.train.Saver()
             if training:
+                # Reconstruction loss
+                self.flattened_input = tf.layers.flatten(self.input_states, name="flattened_input")
+                self.reconstruction_loss = tf.reduce_mean(
+                    tf.reduce_sum(
+                        loss_fn(labels=self.flattened_input, logits=self.reconstructed_logits, targets=self.reconstructed_states),
+                        axis=1
+                    )
+                )
+
+                # KL divergence loss
+                self.kl_loss = kl_divergence(self.mean, self.logstd_sq, name="kl_divergence")
+                if self.kl_tolerance > 0:
+                    self.kl_loss = tf.maximum(self.kl_loss, self.kl_tolerance * self.z_dim)
+                self.kl_loss = tf.reduce_mean(self.kl_loss)
+
+                # Total loss
+                self.loss = self.reconstruction_loss + self.beta * self.kl_loss
+
                 # Summary
                 self.mean_kl_loss, self.update_mean_kl_loss = tf.metrics.mean(self.kl_loss)
                 self.mean_reconstruction_loss, self.update_mean_reconstruction_loss = tf.metrics.mean(self.reconstruction_loss)
@@ -110,7 +104,13 @@ class VAE():
                 # Create optimizer
                 self.optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
                 self.train_step = self.optimizer.minimize(self.loss)
-                for d in self.dirs: os.makedirs(d, exist_ok=True)
+
+            # Set model dirs
+            self.model_name = model_name
+            self.models_dir = os.path.join(models_dir, "models", model_name)
+            self.log_dir = os.path.join(models_dir, "logs", model_name)
+            self.dirs = [self.models_dir, self.log_dir]
+            for d in self.dirs: os.makedirs(d, exist_ok=True)
 
     def init_session(self, sess=None, init_logging=True):
         if sess is None:

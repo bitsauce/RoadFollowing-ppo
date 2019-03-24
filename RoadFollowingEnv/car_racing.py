@@ -147,7 +147,7 @@ class RoadFollowingEnv(gym.Env, EzPickle):
 
         obs = self.reset()
 
-        self.action_space = spaces.Box(np.array([-1, 0]), np.array([1, 1]), dtype=np.float32)  # steer, gas, brake
+        self.action_space = spaces.Box(np.array([-1, -1]), np.array([1, 1]), dtype=np.float32)  # steer, gas, brake
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=obs.shape, dtype=obs.dtype)
 
     def seed(self, seed=None):

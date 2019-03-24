@@ -1,5 +1,6 @@
 import os
 import random
+import re
 import shutil
 import time
 from collections import deque
@@ -16,16 +17,17 @@ from vae.models import ConvVAE, MlpVAE
 from RoadFollowingEnv.car_racing import RoadFollowingEnv
 from utils import VideoRecorder, preprocess_frame, compute_gae
 
-def reward1(state):
-    # -10 for driving off-road
-    if state.off_road == True: return -10 * 0.1
-    # + 1 x throttle
+def reward_fn(state):
+    if state.off_road == True: return -1
     reward = state.velocity * 0.001
-    #reward -= 0.01
     return reward
 
 def create_encode_state_fn(model, with_measurements=False, stack=None):
     def encode_state(state):
+        """
+            Function that encodes the current state of
+            the environment into some feature vector.
+        """
         frame = preprocess_frame(state.frame)
         encoded_state = model.encode([frame])[0]
         if with_measurements:
@@ -45,7 +47,7 @@ def create_encode_state_fn(model, with_measurements=False, stack=None):
 def make_env(title=None, frame_skip=0, encode_state_fn=None):
     env = RoadFollowingEnv(title=title,
                            encode_state_fn=encode_state_fn,
-                           reward_fn=reward1,
+                           reward_fn=reward_fn,
                            throttle_scale=0.1,
                            max_speed=30,
                            terminate_off_road=True,
@@ -84,27 +86,6 @@ def test_agent(test_env, model, video_filename=None):
     return total_reward, test_env.reward
 
 def train(params, model_name, save_interval=10, eval_interval=10, record_eval=True, restart=False):
-    # Load pre-trained variational autoencoder
-    z_dim = 64
-    vae = ConvVAE(input_shape=(84, 84, 1),
-                  z_dim=z_dim, models_dir="vae",
-                  model_name="mse_cnn_zdim64_beta1_data10k",
-                  training=False)
-    vae.init_session(init_logging=False)
-    if not vae.load_latest_checkpoint():
-        raise Exception("Failed to load VAE")
-
-    # State encoding fn
-    #with_measurements = True
-    with_measurements = False
-    stack = None
-    encode_state_fn = create_encode_state_fn(vae, with_measurements=with_measurements, stack=stack)
-
-    # Create env
-    print("Creating environment")
-    env      = make_env(model_name, frame_skip=0, encode_state_fn=encode_state_fn)
-    test_env = make_env(model_name + " (Test)", encode_state_fn=encode_state_fn)
-
     # Traning parameters
     learning_rate    = params["learning_rate"]
     lr_decay         = params["lr_decay"]
@@ -117,17 +98,42 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
     num_epochs       = params["num_epochs"]
     num_episodes     = params["num_episodes"]
     batch_size       = params["batch_size"]
+    vae_model        = params["vae_model"]
+    vae_model_type   = params["vae_model_type"]
+    vae_z_dim        = params["vae_z_dim"]
+
+    if vae_z_dim is None:      vae_z_dim = params["vae_z_dim"] = int(re.findall("zdim(\d+)", vae_model)[0])
+    if vae_model_type is None: vae_model_type = params["vae_model_type"] = "mlp" if "mlp" in vae_model else "cnn"
+    VAEClass = MlpVAE if vae_model_type == "mlp" else ConvVAE
 
     print("")
     print("Training parameters:")
     for k, v, in params.items(): print(f"  {k}: {v}")
     print("")
 
+    # Load pre-trained variational autoencoder
+    vae = VAEClass(input_shape=(84, 84, 1),
+                   z_dim=vae_z_dim, models_dir="vae",
+                   model_name=vae_model,
+                   training=False)
+    vae.init_session(init_logging=False)
+    if not vae.load_latest_checkpoint():
+        raise Exception("Failed to load VAE")
+
+    # State encoding fn
+    with_measurements = False
+    stack = None
+    encode_state_fn = create_encode_state_fn(vae, with_measurements=with_measurements, stack=stack)
+
+    # Create env
+    print("Creating environment")
+    env      = make_env(model_name, frame_skip=0, encode_state_fn=encode_state_fn)
+    test_env = make_env(model_name + " (Test)", encode_state_fn=encode_state_fn)
 
     # Environment constants
-    input_shape      = np.array([z_dim])
-    if with_measurements: input_shape[0] += 3
-    if stack is not None: input_shape[0] *= stack
+    input_shape  = np.array([vae_z_dim])
+    if with_measurements:      input_shape[0] += 3
+    if isinstance(stack, int): input_shape[0] *= stack
     num_actions      = env.action_space.shape[0]
     action_min       = env.action_space.low
     action_max       = env.action_space.high
@@ -250,17 +256,20 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Trains an agent in a the RoadFollowing environment")
 
     # Hyper parameters
-    parser.add_argument("--learning_rate", type=float, default=3e-4)
-    parser.add_argument("--lr_decay", type=float, default=1.0)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--lr_decay", type=float, default=0.98)
     parser.add_argument("--discount_factor", type=float, default=0.99)
     parser.add_argument("--gae_lambda", type=float, default=0.95)
     parser.add_argument("--ppo_epsilon", type=float, default=0.2)
-    parser.add_argument("--value_scale", type=float, default=0.5)
+    parser.add_argument("--value_scale", type=float, default=1.0)
     parser.add_argument("--entropy_scale", type=float, default=0.01)
     parser.add_argument("--horizon", type=int, default=128)
-    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--num_episodes", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--vae_model", type=str, default="bce_cnn_zdim64_beta1_kl_tolerance0.0_data10k")
+    parser.add_argument("--vae_model_type", type=str, default=None)
+    parser.add_argument("--vae_z_dim", type=int, default=None)
 
     # Training vars
     parser.add_argument("--model_name", type=str, required=True)

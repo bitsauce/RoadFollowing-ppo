@@ -12,7 +12,7 @@ import matplotlib.animation as animation
 from models import MlpVAE, ConvVAE
 
 parser = argparse.ArgumentParser(description="Visualizes the features learned by the VAE")
-parser.add_argument("-reconstruct", action="store_true")
+parser.add_argument("-interactive", action="store_true")
 parser.add_argument("--model_name", type=str, required=True)
 parser.add_argument("--models_dir", type=str, default=".")
 parser.add_argument("--model_type", type=str, default="mlp")
@@ -30,7 +30,7 @@ vae.init_session(init_logging=False)
 if not vae.load_latest_checkpoint():
     print("Failed to load latest checkpoint for model \"{}\"".format(args.model_name))
 
-if args.reconstruct:
+if args.interactive:
     from RoadFollowingEnv.car_racing import RoadFollowingEnv
     from utils import preprocess_frame
     from pyglet.window import key

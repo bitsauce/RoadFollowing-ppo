@@ -20,6 +20,7 @@ if __name__ == "__main__":
     parser.add_argument("--z_dim", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--kl_tolerance", type=float, default=0.5)
     args = parser.parse_args()
 
     with gzip.open(args.dataset, "rb") as f:
@@ -42,8 +43,9 @@ if __name__ == "__main__":
     print("")
 
     if args.model_name is None:
-        args.model_name = "{}_{}_zdim{}_beta{}_{}".format(args.loss_type, args.model_type, args.z_dim,
-                                                          args.beta, os.path.splitext(os.path.basename(args.dataset))[0])
+        args.model_name = "{}_{}_zdim{}_beta{}_kl_tolerance{}_{}".format(
+            args.loss_type, args.model_type, args.z_dim, args.beta, args.kl_tolerance,
+            os.path.splitext(os.path.basename(args.dataset))[0])
 
     if args.loss_type == "bce": loss_fn = bce_loss
     elif args.loss_type == "bce_v2": loss_fn = bce_loss_v2
@@ -58,6 +60,7 @@ if __name__ == "__main__":
               z_dim=args.z_dim,
               beta=args.beta,
               learning_rate=args.learning_rate,
+              kl_tolerance=args.kl_tolerance,
               loss_fn=loss_fn,
               model_name=args.model_name)
     vae.init_session()
