@@ -7,6 +7,7 @@ from collections import deque
 
 import cv2
 import gym
+from gym.wrappers import TimeLimit
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
@@ -53,6 +54,7 @@ def make_env(title=None, frame_skip=0, encode_state_fn=None):
                            terminate_off_road=True,
                            terminate_when_stopped=True,
                            frame_skip=frame_skip)
+    env = TimeLimit(env, max_episode_steps=1000)
     env.seed(0)
     return env
 
