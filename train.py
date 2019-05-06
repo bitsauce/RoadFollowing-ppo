@@ -54,7 +54,7 @@ def make_env(title=None, frame_skip=0, encode_state_fn=None):
                            terminate_off_road=True,
                            terminate_when_stopped=True,
                            frame_skip=frame_skip)
-    env = TimeLimit(env, max_episode_steps=1000)
+    env = TimeLimit(env, max_episode_steps=5000)
     env.seed(0)
     return env
 
@@ -85,7 +85,7 @@ def test_agent(test_env, model, video_filename=None):
     if video_recorder:
         video_recorder.release()
     
-    return total_reward, test_env.reward
+    return total_reward, test_env.env.reward
 
 def train(params, model_name, save_interval=10, eval_interval=10, record_eval=True, restart=False):
     # Traning parameters
@@ -190,7 +190,7 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                 action, value = model.predict([state], write_to_summary=True)
 
                 # Show value on-screen
-                env.value_label.text = "V(s)={:.2f}".format(value)
+                env.env.value_label.text = "V(s)={:.2f}".format(value)
 
                 # Perform action
                 new_state, reward, terminal_state, _ = env.step(action)
@@ -247,7 +247,7 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                                 returns[mb_idx], advantages[mb_idx])
 
         # Write episodic values
-        model.write_value_to_summary("train/score", env.reward, episode_idx)
+        model.write_value_to_summary("train/score", env.env.reward, episode_idx)
         model.write_value_to_summary("train/reward", total_reward, episode_idx)
         model.write_value_to_summary("train/value", total_value, episode_idx)
         model.write_episodic_summaries()
