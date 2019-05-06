@@ -13,7 +13,7 @@ class PolicyGraph():
         Manages the policy computation graph
     """
 
-    def __init__(self, input_states, taken_actions,
+    def __init__(self, input_states, additional_states, taken_actions,
                  num_actions, action_min, action_max, scope_name,
                  initial_std=0.4, initial_mean_factor=0.1,
                  pi_hidden_sizes=(500, 300), vf_hidden_sizes=(500, 300)):
@@ -35,8 +35,17 @@ class PolicyGraph():
         """
 
         with tf.variable_scope(scope_name):
+            # From vae
+            x = tf.layers.conv2d(input_states, filters=32,  kernel_size=4, strides=2, activation=tf.nn.relu, padding="valid", name="conv1")
+            x = tf.layers.conv2d(x, filters=64,  kernel_size=4, strides=2, activation=tf.nn.relu, padding="valid", name="conv2")
+            x = tf.layers.conv2d(x, filters=128, kernel_size=4, strides=2, activation=tf.nn.relu, padding="valid", name="conv3")
+            x = tf.layers.conv2d(x, filters=256, kernel_size=4, strides=2, activation=tf.nn.relu, padding="valid", name="conv4")
+            x = tf.layers.flatten(x, name="flatten")
+            x = tf.layers.dense(x, 64, activation=None, name="dense1")
+            x = tf.concat([x, additional_states], axis=-1)
+
             # Policy branch π(a_t | s_t; θ)
-            self.pi = build_mlp(input_states, hidden_sizes=pi_hidden_sizes, activation=tf.nn.relu, output_activation=tf.nn.relu)
+            self.pi = build_mlp(x, hidden_sizes=pi_hidden_sizes, activation=tf.nn.relu, output_activation=tf.nn.relu)
             self.action_mean = tf.layers.dense(self.pi, num_actions,
                                                activation=tf.nn.tanh,
                                                kernel_initializer=tf.initializers.variance_scaling(scale=initial_mean_factor),
@@ -48,7 +57,7 @@ class PolicyGraph():
             if vf_hidden_sizes is None:
                 self.vf = self.pi # Share features if None
             else:
-                self.vf = build_mlp(input_states, hidden_sizes=vf_hidden_sizes, activation=tf.nn.relu, output_activation=tf.nn.relu)
+                self.vf = build_mlp(x, hidden_sizes=vf_hidden_sizes, activation=tf.nn.relu, output_activation=tf.nn.relu)
             self.value = tf.squeeze(tf.layers.dense(self.vf, 1, activation=None, name="value"), axis=-1)
         
             # Create graph for sampling actions
@@ -67,7 +76,7 @@ class PPO():
         Proximal policy gradient model class
     """
 
-    def __init__(self, input_shape, num_actions, action_min, action_max,
+    def __init__(self, input_shape, num_additional_states, num_actions, action_min, action_max,
                  learning_rate=3e-4, lr_decay=0.998, epsilon=0.2,
                  value_scale=0.5, entropy_scale=0.01,
                  output_dir="./"):
@@ -101,9 +110,10 @@ class PPO():
         
         # Create placeholders
         self.input_states  = tf.placeholder(shape=(None, *input_shape), dtype=tf.float32, name="input_state_placeholder")
+        self.additional_states  = tf.placeholder(shape=(None, num_additional_states), dtype=tf.float32, name="additional_state_placeholder")
         self.taken_actions = tf.placeholder(shape=(None, num_actions), dtype=tf.float32, name="taken_action_placeholder")
-        self.policy        = PolicyGraph(self.input_states, self.taken_actions, num_actions, action_min, action_max, "policy")
-        self.policy_old    = PolicyGraph(self.input_states, self.taken_actions, num_actions, action_min, action_max, "policy_old")
+        self.policy        = PolicyGraph(self.input_states, self.additional_states, self.taken_actions, num_actions, action_min, action_max, "policy")
+        self.policy_old    = PolicyGraph(self.input_states, self.additional_states, self.taken_actions, num_actions, action_min, action_max, "policy_old")
 
         # Create policy gradient train function
         self.returns   = tf.placeholder(shape=(None,), dtype=tf.float32, name="returns_placeholder")
@@ -211,11 +221,12 @@ class PPO():
             except:
                 return False
         
-    def train(self, input_states, taken_actions, returns, advantage):
+    def train(self, input_states, additional_states, taken_actions, returns, advantage):
         _, _, summaries, step_idx = \
             self.sess.run([self.train_step, self.update_metrics_op, self.stepwise_summaries, self.train_step_counter.var],
                 feed_dict={
                     self.input_states: input_states,
+                    self.additional_states: additional_states,
                     self.taken_actions: taken_actions,
                     self.returns: returns,
                     self.advantage: advantage
@@ -224,11 +235,11 @@ class PPO():
         self.train_writer.add_summary(summaries, step_idx)
         self.sess.run(self.train_step_counter.inc_op) # Inc step counter
         
-    def predict(self, input_states, greedy=False, write_to_summary=False):
+    def predict(self, input_states, additional_states, greedy=False, write_to_summary=False):
         action = self.policy.action_mean if greedy else self.policy.sampled_action
         sampled_action, value, summaries, step_idx = \
             self.sess.run([action, self.policy.value, self.stepwise_prediction_summaries, self.predict_step_counter.var],
-                feed_dict={self.input_states: input_states}
+                feed_dict={self.input_states: input_states, self.additional_states: additional_states}
             )
 
         if write_to_summary:

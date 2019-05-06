@@ -14,7 +14,7 @@ import tensorflow as tf
 from skimage import transform
 
 from ppo import PPO
-from vae.models import ConvVAE, MlpVAE
+#from vae.models import ConvVAE, MlpVAE
 from RoadFollowingEnv.car_racing import RoadFollowingEnv
 from utils import VideoRecorder, preprocess_frame, compute_gae
 
@@ -23,26 +23,15 @@ def reward_fn(state):
     reward = state.velocity * 0.001
     return reward
 
-def create_encode_state_fn(model, with_measurements=False, stack=None):
+def create_encode_state_fn():
     def encode_state(state):
         """
             Function that encodes the current state of
             the environment into some feature vector.
         """
         frame = preprocess_frame(state.frame)
-        encoded_state = model.encode([frame])[0]
-        if with_measurements:
-            encoded_state = np.append(encoded_state, [state.throttle, state.steering, state.velocity / 30.0])
-        if isinstance(stack, int):
-            s1 = np.array(encoded_state)
-            if not hasattr(state, "stack"):
-                state.stack = [np.zeros_like(encoded_state) for _ in range(stack)]
-                state.stack_idx = 0
-            state.stack[state.stack_idx % stack] = s1
-            state.stack_idx += 1
-            concat_state = np.concatenate(state.stack)
-            return concat_state
-        return np.array(encoded_state)
+        measurements = [state.throttle, state.steering, state.velocity / 30.0]
+        return np.array(frame), np.array(measurements)
     return encode_state
 
 def make_env(title=None, frame_skip=0, encode_state_fn=None):
@@ -73,7 +62,7 @@ def test_agent(test_env, model, video_filename=None):
     # While non-terminal state
     while not terminal:
         # Take deterministic actions at test time (noise_scale=0)
-        action, _ = model.predict([state], greedy=True)
+        action, _ = model.predict([state[0]], [state[1]], greedy=True)
         state, reward, terminal, _ = test_env.step(action)
 
         # Add frame
@@ -100,13 +89,13 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
     num_epochs       = params["num_epochs"]
     num_episodes     = params["num_episodes"]
     batch_size       = params["batch_size"]
-    vae_model        = params["vae_model"]
+    """vae_model        = params["vae_model"]
     vae_model_type   = params["vae_model_type"]
     vae_z_dim        = params["vae_z_dim"]
 
     if vae_z_dim is None:      vae_z_dim = params["vae_z_dim"] = int(re.findall("zdim(\d+)", vae_model)[0])
     if vae_model_type is None: vae_model_type = params["vae_model_type"] = "mlp" if "mlp" in vae_model else "cnn"
-    VAEClass = MlpVAE if vae_model_type == "mlp" else ConvVAE
+    VAEClass = MlpVAE if vae_model_type == "mlp" else ConvVAE"""
 
     print("")
     print("Training parameters:")
@@ -114,18 +103,16 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
     print("")
 
     # Load pre-trained variational autoencoder
-    vae = VAEClass(input_shape=(84, 84, 1),
+    """vae = VAEClass(input_shape=(84, 84, 1),
                    z_dim=vae_z_dim, models_dir="vae",
                    model_name=vae_model,
                    training=False)
     vae.init_session(init_logging=False)
     if not vae.load_latest_checkpoint():
-        raise Exception("Failed to load VAE")
+        raise Exception("Failed to load VAE")"""
 
     # State encoding fn
-    with_measurements = False
-    stack = None
-    encode_state_fn = create_encode_state_fn(vae, with_measurements=with_measurements, stack=stack)
+    encode_state_fn = create_encode_state_fn()
 
     # Create env
     print("Creating environment")
@@ -133,16 +120,14 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
     test_env = make_env(model_name + " (Test)", encode_state_fn=encode_state_fn)
 
     # Environment constants
-    input_shape  = np.array([vae_z_dim])
-    if with_measurements:      input_shape[0] += 3
-    if isinstance(stack, int): input_shape[0] *= stack
-    num_actions      = env.action_space.shape[0]
-    action_min       = env.action_space.low
-    action_max       = env.action_space.high
+    input_shape = np.array([84, 84, 1])
+    num_actions = env.action_space.shape[0]
+    action_min  = env.action_space.low
+    action_max  = env.action_space.high
 
     # Create model
     print("Creating model")
-    model = PPO(input_shape, num_actions, action_min, action_max,
+    model = PPO(input_shape, 3, num_actions, action_min, action_max,
                 learning_rate=learning_rate, lr_decay=lr_decay,
                 epsilon=ppo_epsilon, value_scale=value_scale, entropy_scale=entropy_scale,
                 output_dir=os.path.join("models", model_name))
@@ -185,9 +170,9 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
         # While episode not done
         print(f"Episode {episode_idx} (Step {model.get_train_step_idx()})")
         while not terminal_state:
-            states, taken_actions, values, rewards, dones = [], [], [], [], []
+            states, astates, taken_actions, values, rewards, dones = [], [], [], [], [], []
             for _ in range(horizon):
-                action, value = model.predict([state], write_to_summary=True)
+                action, value = model.predict([state[0]], [state[1]], write_to_summary=True)
 
                 # Show value on-screen
                 env.env.value_label.text = "V(s)={:.2f}".format(value)
@@ -198,7 +183,8 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                 total_reward += reward
 
                 # Store state, action and reward
-                states.append(state)         # [T, *input_shape]
+                states.append(state[0])      # [T, *input_shape]
+                astates.append(state[1])     # [T, *input_shape]
                 taken_actions.append(action) # [T,  num_actions]
                 values.append(value)         # [T]
                 rewards.append(reward)       # [T]
@@ -209,7 +195,7 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                     break
 
             # Calculate last value (bootstrap value)
-            _, last_values = model.predict([state]) # []
+            _, last_values = model.predict([state[0]], [state[1]]) # []
             
             # Compute GAE
             advantages = compute_gae(rewards, values, last_values, dones, discount_factor, gae_lambda)
@@ -218,12 +204,14 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
 
             # Flatten arrays
             states        = np.array(states)
+            astates        = np.array(astates)
             taken_actions = np.array(taken_actions)
             returns       = np.array(returns)
             advantages    = np.array(advantages)
 
             T = len(rewards)
             assert states.shape == (T, *input_shape)
+            assert astates.shape == (T, 3)
             assert taken_actions.shape == (T, num_actions)
             assert returns.shape == (T,)
             assert advantages.shape == (T,)
@@ -243,7 +231,7 @@ def train(params, model_name, save_interval=10, eval_interval=10, record_eval=Tr
                     mb_idx = indices[begin:end]
 
                     # Optimize network
-                    model.train(states[mb_idx], taken_actions[mb_idx],
+                    model.train(states[mb_idx], astates[mb_idx], taken_actions[mb_idx],
                                 returns[mb_idx], advantages[mb_idx])
 
         # Write episodic values
@@ -269,9 +257,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--num_episodes", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--vae_model", type=str, default="bce_cnn_zdim64_beta1_kl_tolerance0.0_data10k")
-    parser.add_argument("--vae_model_type", type=str, default=None)
-    parser.add_argument("--vae_z_dim", type=int, default=None)
+    #parser.add_argument("--vae_model", type=str, default="bce_cnn_zdim64_beta1_kl_tolerance0.0_data10k")
+    #parser.add_argument("--vae_model_type", type=str, default=None)
+    #parser.add_argument("--vae_z_dim", type=int, default=None)
 
     # Training vars
     parser.add_argument("--model_name", type=str, required=True)
